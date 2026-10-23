@@ -57,7 +57,20 @@ setup_commands:
   # Line 'sudo grep ..': set the number of threads per process to unlimited to avoid ray job submit stucking issue when the number of running ray jobs increase.
   # Line 'mkdir -p ..': disable host key check
   # Line 'python3 -c ..': patch the buggy ray files and enable `-o allow_other` option for `goofys`
-  - {%- for initial_setup_command in initial_setup_commands %}
+  # Lines 'command -v ufw ..' to 'sudo ufw status ..': Shadeform puts no firewall in front of its VMs, and Ray
+  # (started after these commands) has no authentication. Allow only the SSH ports sshd and this session use,
+  # before Ray listens, and stop if the firewall is not active. Reset only an inactive ufw, to drop image rules
+  # without opening a running Ray on a rerun. Multi-node clusters would also need the peer IPs.
+  - command -v ufw > /dev/null || (sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q ufw);
+    SKY_SSH_PORTS=$( (sudo sshd -T 2>/dev/null | awk '$1 == "port" {print $2} $1 == "listenaddress" {n = split($2, a, ":"); print a[n]}'; echo "${SSH_CONNECTION:-}" | awk '{print $4}') | grep -E '^[0-9]+$' | sort -u);
+    [ -n "$SKY_SSH_PORTS" ] || { echo "SkyPilot - no SSH port found, refusing to start Ray without a firewall" >&2; exit 1; };
+    if [ -f /etc/default/ufw ]; then sudo sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw; fi;
+    sudo ufw status | grep -qw active || sudo ufw --force reset;
+    sudo ufw default deny incoming; sudo ufw default allow outgoing;
+    for p in $SKY_SSH_PORTS; do sudo ufw allow "$p/tcp"; done;
+    sudo ufw --force enable;
+    sudo ufw status | grep -qw active || { echo "SkyPilot - ufw is not active, refusing to start Ray" >&2; exit 1; };
+    {%- for initial_setup_command in initial_setup_commands %}
     {{ initial_setup_command }}
     {%- endfor %}
     mkdir -p ~/.ssh; touch ~/.ssh/config; which patch > /dev/null || sudo apt install -y patch;
